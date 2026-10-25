@@ -1,0 +1,174 @@
+# Cluster DNS Pi-hole : deux nœuds, une VIP VRRP, synchro primaire → réplica.
+#
+# Pi-hole n'a pas de mode cluster. Ce stack le construit :
+#   - pihole-1 (priorité 150) et pihole-2 (priorité 100) répondent en DNS ;
+#   - keepalived élit une VIP unique (VRRP unicast) et la retire si le DNS local ne répond plus ;
+#   - nebula-sync pousse la configuration du primaire vers le réplica.
+#
+# Profils (COMPOSE_PROFILES dans .env) :
+#   bundle  les deux nœuds sur ce moteur Docker
+#   node1   uniquement le primaire (à poser sur la machine 1)
+#   node2   uniquement le réplica (à poser sur la machine 2)
+#
+# Les clients n'utilisent que la VIP. L'admin se fait sur le primaire, jamais via la VIP.
+
+name: pihole-cluster
+
+x-pihole: &pihole
+  image: pihole/pihole:latest
+  cap_add:
+    - NET_ADMIN
+    - NET_BROADCAST
+    - NET_RAW
+    - SYS_NICE
+    - SYS_TIME
+  sysctls:
+    - net.ipv4.conf.all.rp_filter=0
+    - net.ipv4.conf.default.rp_filter=0
+  dns:
+    - ${UPSTREAM_1}
+    - ${UPSTREAM_2}
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  healthcheck:
+    test: ["CMD-SHELL", "dig +time=2 +tries=1 +retry=0 @127.0.0.1 pi.hole A >/dev/null 2>&1 || exit 1"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 60s
+
+x-pihole-env: &pihole-env
+  TZ: ${TZ}
+  FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD}
+  # La VIP est ajoutée après le démarrage : FTL doit écouter toutes les interfaces.
+  FTLCONF_dns_listeningMode: "ALL"
+  FTLCONF_dns_upstreams: "${UPSTREAM_1};${UPSTREAM_2}"
+  FTLCONF_dns_dnssec: "${DNSSEC:-false}"
+  # Le DHCP des deux nœuds se marcherait dessus. Le routeur distribue la VIP comme DNS.
+  FTLCONF_dhcp_active: "false"
+  # Autorise l'import Teleporter de nebula-sync quand on utilise un mot de passe d'application.
+  FTLCONF_webserver_api_app_sudo: "true"
+
+x-keepalived: &keepalived
+  image: pihole-cluster-keepalived:local
+  build: ./keepalived
+  cap_add:
+    - NET_ADMIN
+    - NET_BROADCAST
+    - NET_RAW
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  pihole-1:
+    <<: *pihole
+    profiles: ["bundle", "node1"]
+    container_name: pihole-1
+    hostname: pihole-1
+    environment:
+      <<: *pihole-env
+      FTLCONF_misc_dnsmasq_lines: "local=/cluster/;host-record=pihole-1.cluster,${NODE1_IP}"
+    volumes:
+      - ./data/pihole-1:/etc/pihole
+    networks:
+      cluster:
+        ipv4_address: ${NODE1_IP}
+
+  pihole-2:
+    <<: *pihole
+    profiles: ["bundle", "node2"]
+    container_name: pihole-2
+    hostname: pihole-2
+    environment:
+      <<: *pihole-env
+      FTLCONF_misc_dnsmasq_lines: "local=/cluster/;host-record=pihole-2.cluster,${NODE2_IP}"
+    volumes:
+      - ./data/pihole-2:/etc/pihole
+    networks:
+      cluster:
+        ipv4_address: ${NODE2_IP}
+
+  keepalived-1:
+    <<: *keepalived
+    profiles: ["bundle", "node1"]
+    container_name: keepalived-1
+    network_mode: "service:pihole-1"
+    depends_on:
+      pihole-1:
+        condition: service_healthy
+    environment:
+      ROUTER_ID: pihole-1
+      INTERFACE: ${CLUSTER_INTERFACE:-auto}
+      SRC_IP: ${NODE1_IP}
+      PEER_IP: ${NODE2_IP}
+      VIP_CIDR: ${VIP_CIDR}
+      VRRP_ROUTER_ID: ${VRRP_ROUTER_ID}
+      VRRP_AUTH_PASS: ${VRRP_AUTH_PASS}
+      PRIORITY: ${NODE1_PRIORITY:-150}
+      KEEPALIVED_DEBUG: ${KEEPALIVED_DEBUG:-0}
+
+  keepalived-2:
+    <<: *keepalived
+    profiles: ["bundle", "node2"]
+    container_name: keepalived-2
+    network_mode: "service:pihole-2"
+    depends_on:
+      pihole-2:
+        condition: service_healthy
+    environment:
+      ROUTER_ID: pihole-2
+      INTERFACE: ${CLUSTER_INTERFACE:-auto}
+      SRC_IP: ${NODE2_IP}
+      PEER_IP: ${NODE1_IP}
+      VIP_CIDR: ${VIP_CIDR}
+      VRRP_ROUTER_ID: ${VRRP_ROUTER_ID}
+      VRRP_AUTH_PASS: ${VRRP_AUTH_PASS}
+      PRIORITY: ${NODE2_PRIORITY:-100}
+      KEEPALIVED_DEBUG: ${KEEPALIVED_DEBUG:-0}
+
+  nebula-sync:
+    image: ghcr.io/lovelaze/nebula-sync:latest
+    profiles: ["bundle", "node1"]
+    container_name: nebula-sync
+    # Même pile réseau que le primaire : pas d'adresse LAN supplémentaire.
+    network_mode: "service:pihole-1"
+    depends_on:
+      pihole-1:
+        condition: service_healthy
+      pihole-2:
+        condition: service_healthy
+        required: false
+    environment:
+      TZ: ${TZ}
+      PRIMARY: "http://127.0.0.1|${PIHOLE_PASSWORD}"
+      REPLICAS: "http://${NODE2_IP}|${PIHOLE_PASSWORD}"
+      FULL_SYNC: "true"
+      RUN_GRAVITY: "${RUN_GRAVITY:-true}"
+      CRON: ${SYNC_CRON}
+      CLIENT_RETRY_DELAY_SECONDS: "10"
+      CLIENT_TIMEOUT_SECONDS: "120"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  cluster:
+    name: ${CLUSTER_DOCKER_NETWORK:-pihole-cluster}
+    driver: macvlan
+    driver_opts:
+      parent: ${LAN_PARENT}
+    ipam:
+      config:
+        - subnet: ${LAN_SUBNET}
+          gateway: ${LAN_GATEWAY}
