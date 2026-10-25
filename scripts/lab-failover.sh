@@ -22,9 +22,13 @@ logs() {
 }
 
 cleanup() {
-    if [[ -f "$LAB_COMPOSE" ]]; then
+    if [[ -f "${LAB_COMPOSE:-}" ]]; then
         "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
         rm -f "$LAB_COMPOSE"
+    fi
+    if [[ "${LAB_LEGACY_FW:-0}" == 1 && -n "${LAN_SUBNET:-}" ]]; then
+        sudo iptables-legacy -D FORWARD -s "$LAN_SUBNET" -j ACCEPT >/dev/null 2>&1 || true
+        sudo iptables-legacy -D FORWARD -d "$LAN_SUBNET" -j ACCEPT >/dev/null 2>&1 || true
     fi
 }
 
@@ -66,6 +70,24 @@ PY
 
 cp "$ROOT/env.lab.example" "$ENV_FILE"
 "$ROOT/scripts/preflight.sh"
+
+# shellcheck disable=SC1090
+set -a
+source "$ENV_FILE"
+set +a
+
+# Certains hôtes ont iptables-legacy (FORWARD DROP) en plus des règles nft
+# que Docker programme. Le subnet du lab n'est alors pas routé : Pi-hole ne
+# peut pas télécharger gravity. On ouvre ce subnet uniquement pour le test.
+if sudo iptables-legacy -S FORWARD 2>/dev/null | head -n 1 | grep -q -- '-P FORWARD DROP'; then
+    LAB_LEGACY_FW=1
+    sudo iptables-legacy -C FORWARD -s "$LAN_SUBNET" -j ACCEPT 2>/dev/null \
+        || sudo iptables-legacy -I FORWARD 1 -s "$LAN_SUBNET" -j ACCEPT
+    sudo iptables-legacy -C FORWARD -d "$LAN_SUBNET" -j ACCEPT 2>/dev/null \
+        || sudo iptables-legacy -I FORWARD 1 -d "$LAN_SUBNET" -j ACCEPT
+fi
+
+sudo rm -rf "$ROOT/data"
 
 echo "Construction et démarrage du cluster de lab..."
 "${COMPOSE[@]}" up -d --build --wait --wait-timeout 300
