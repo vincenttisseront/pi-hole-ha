@@ -152,7 +152,7 @@ services:
       REPLICAS: "http://${NODE2_IP}|${PIHOLE_PASSWORD}"
       FULL_SYNC: "true"
       RUN_GRAVITY: "${RUN_GRAVITY:-true}"
-      CRON: ${SYNC_CRON}
+      CRON: "${SYNC_CRON}"
       CLIENT_RETRY_DELAY_SECONDS: "10"
       CLIENT_TIMEOUT_SECONDS: "120"
     restart: unless-stopped
