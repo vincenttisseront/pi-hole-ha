@@ -46,6 +46,8 @@ Admin: `https://<TRAEFIK_HOST>/admin/` (Traefik). Edit lists only on the primary
 | `TRAEFIK_*` | Reverse-proxy labels for the primary UI |
 | `REPLICA_HOST` | Docker DNS name of the replica (`pihole-2`) |
 
+Watchtower: `pihole-1`, `pihole-2`, and `nebula-sync` have `com.centurylinklabs.watchtower.enable=true`. `dnsdist` is a local build and is opted out. Your Watchtower must run with `--label-enable` (or `WATCHTOWER_LABEL_ENABLE=true`).
+
 ## Failover
 
 ```bash
