@@ -75,9 +75,11 @@ if prefix != subnet.prefixlen:
     sys.exit(f"VIP_CIDR /{prefix} doit avoir le même masque que LAN_SUBNET (/{subnet.prefixlen})")
 PY
 
-if ! ip link show "$LAN_PARENT" >/dev/null 2>&1; then
-    echo "Interface LAN_PARENT=$LAN_PARENT introuvable. Regarde 'ip -br link'." >&2
-    exit 1
+if [[ "${PREFLIGHT_SKIP_NIC:-0}" != "1" ]]; then
+    if ! ip link show "$LAN_PARENT" >/dev/null 2>&1; then
+        echo "Interface LAN_PARENT=$LAN_PARENT introuvable. Regarde 'ip -br link'." >&2
+        exit 1
+    fi
 fi
 
 echo "Préflight OK ($COMPOSE_PROFILES, VIP ${VIP}, nœuds ${NODE1_IP} et ${NODE2_IP}, parent ${LAN_PARENT})."

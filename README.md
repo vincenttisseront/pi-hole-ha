@@ -105,7 +105,7 @@ sudo ip route add 192.168.1.10/32 dev pihole-shim
 
 ## Lab sans toucher au LAN
 
-`scripts/lab-failover.sh` crée une interface `dummy`, démarre le stack dessus, vérifie qu’un `dig` vers la VIP répond, arrête le nœud maître, et vérifie que l’autre répond. Il détruit le lab en sortant.
+`scripts/lab-failover.sh` reprend les mêmes services et les branche sur un bridge Docker (pas d’interface physique, pas de macvlan). Il vérifie qu’un `dig` vers la VIP répond, arrête le nœud qui la porte, et vérifie que l’autre répond. Il détruit le lab en sortant.
 
 ```bash
 ./scripts/lab-failover.sh

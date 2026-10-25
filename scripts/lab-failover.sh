@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
-# Fait tourner le cluster sur une interface dummy et vérifie la bascule de VIP.
-# N'utilise pas le LAN réel. Nettoie les conteneurs et les interfaces en sortant.
+# Vérifie la bascule de VIP sur un bridge Docker, sans toucher au LAN.
+# Les services viennent de docker-compose.yml ; seul le réseau est remplacé.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PARENT="${LAB_PARENT:-pihole-dummy}"
-SHIM="${LAB_SHIM:-pihole-shim}"
-SHIM_ADDR="${LAB_SHIM_ADDR:-192.168.199.1/24}"
 ENV_FILE="$ROOT/.env.lab"
-export ENV_FILE
+LAB_COMPOSE="$(mktemp)"
+export ENV_FILE PREFLIGHT_SKIP_NIC=1
 
 if docker info >/dev/null 2>&1; then
-    COMPOSE=(docker compose --env-file "$ENV_FILE")
+    COMPOSE=(docker compose --project-directory "$ROOT" -f "$LAB_COMPOSE" --env-file "$ENV_FILE")
 else
-    COMPOSE=(sudo docker compose --env-file "$ENV_FILE")
+    COMPOSE=(sudo docker compose --project-directory "$ROOT" -f "$LAB_COMPOSE" --env-file "$ENV_FILE")
 fi
 
 logs() {
@@ -24,9 +22,10 @@ logs() {
 }
 
 cleanup() {
-    "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
-    sudo ip link del "$SHIM" >/dev/null 2>&1 || true
-    sudo ip link del "$PARENT" >/dev/null 2>&1 || true
+    if [[ -f "$LAB_COMPOSE" ]]; then
+        "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+        rm -f "$LAB_COMPOSE"
+    fi
 }
 
 on_exit() {
@@ -42,15 +41,28 @@ on_exit() {
 }
 trap on_exit EXIT
 
-sudo modprobe dummy 2>/dev/null || true
-sudo ip link del "$SHIM" >/dev/null 2>&1 || true
-sudo ip link del "$PARENT" >/dev/null 2>&1 || true
-sudo ip link add "$PARENT" type dummy
-sudo ip link set "$PARENT" up
-sudo ip link set "$PARENT" promisc on
-sudo ip link add "$SHIM" link "$PARENT" type macvlan mode bridge
-sudo ip addr add "$SHIM_ADDR" dev "$SHIM"
-sudo ip link set "$SHIM" up
+# Ce noyau de lab n'a pas forcément macvlan. On garde les services du
+# compose de production et on remplace seulement le réseau par un bridge,
+# pour pouvoir joindre la VIP depuis l'hôte sans toucher au LAN.
+python3 - "$ROOT/docker-compose.yml" "$LAB_COMPOSE" <<'PY'
+import sys
+from pathlib import Path
+source, dest = sys.argv[1:]
+text = Path(source).read_text()
+head, sep, _ = text.partition("\nnetworks:\n")
+if not sep:
+    raise SystemExit("bloc networks introuvable dans docker-compose.yml")
+Path(dest).write_text(head + """
+networks:
+  cluster:
+    name: pihole-lab
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.199.0/24
+          gateway: 192.168.199.1
+""")
+PY
 
 cp "$ROOT/env.lab.example" "$ENV_FILE"
 "$ROOT/scripts/preflight.sh"
