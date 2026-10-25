@@ -7,7 +7,7 @@ ENV_FILE="${ENV_FILE:-$ROOT/.env}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
     echo "Fichier manquant : $ENV_FILE" >&2
-    echo "Copie .env.example vers .env et renseigne les adresses du LAN." >&2
+    echo "Copie .env.example vers .env et renseigne le LAN / la VIP / Traefik." >&2
     exit 1
 fi
 
@@ -18,7 +18,7 @@ set +a
 
 required=(
     COMPOSE_PROFILES TZ LAN_PARENT LAN_SUBNET LAN_GATEWAY
-    NODE1_IP NODE2_IP VIP VIP_CIDR VRRP_ROUTER_ID VRRP_AUTH_PASS
+    VIP VIP_CIDR VRRP_ROUTER_ID VRRP_AUTH_PASS
     PIHOLE_PASSWORD UPSTREAM_1 UPSTREAM_2 SYNC_CRON
 )
 for name in "${required[@]}"; do
@@ -56,18 +56,23 @@ if [[ "$PIHOLE_PASSWORD" == "changeme-now" || ${#PIHOLE_PASSWORD} -lt 8 ]]; then
     exit 1
 fi
 
-python3 - "$LAN_SUBNET" "$LAN_GATEWAY" "$NODE1_IP" "$NODE2_IP" "$VIP" "$VIP_CIDR" <<'PY'
+if grep -qE '^(NODE1_IP|NODE2_IP)=' "$ENV_FILE"; then
+    echo "Retire NODE1_IP / NODE2_IP de .env : Docker assigne les IP des conteneurs." >&2
+    echo "Garde seulement VIP / VIP_CIDR (et le sous-réseau macvlan)." >&2
+    exit 1
+fi
+
+python3 - "$LAN_SUBNET" "$LAN_GATEWAY" "$VIP" "$VIP_CIDR" <<'PY'
 import ipaddress, sys
 subnet = ipaddress.ip_network(sys.argv[1], strict=False)
-gateway, node1, node2, vip = map(ipaddress.ip_address, sys.argv[2:6])
-vip_cidr = sys.argv[6]
-seen = {}
-for name, ip in (("LAN_GATEWAY", gateway), ("NODE1_IP", node1), ("NODE2_IP", node2), ("VIP", vip)):
-    if ip not in subnet:
-        sys.exit(f"{name}={ip} n'est pas dans {subnet}")
-    if ip in seen:
-        sys.exit(f"{name} et {seen[ip]} utilisent la même adresse")
-    seen[ip] = name
+gateway, vip = map(ipaddress.ip_address, sys.argv[2:4])
+vip_cidr = sys.argv[4]
+if gateway not in subnet:
+    sys.exit(f"LAN_GATEWAY={gateway} n'est pas dans {subnet}")
+if vip not in subnet:
+    sys.exit(f"VIP={vip} n'est pas dans {subnet}")
+if gateway == vip:
+    sys.exit("LAN_GATEWAY et VIP doivent être différentes")
 if not vip_cidr.startswith(f"{vip}/"):
     sys.exit("VIP_CIDR doit être VIP suivi du masque, par exemple 192.168.1.10/24")
 prefix = int(vip_cidr.split("/", 1)[1])
@@ -126,4 +131,4 @@ extra=""
 if [[ "$TRAEFIK_ENABLE" == "true" ]]; then
     extra=", Traefik Host ${TRAEFIK_HOST} via ${TRAEFIK_DOCKER_NETWORK}"
 fi
-echo "Préflight OK ($COMPOSE_PROFILES, VIP ${VIP}, nœuds ${NODE1_IP} et ${NODE2_IP}, parent ${LAN_PARENT}${extra})."
+echo "Préflight OK ($COMPOSE_PROFILES, VIP ${VIP} réservée, IP nœuds = Docker, parent ${LAN_PARENT}${extra})."

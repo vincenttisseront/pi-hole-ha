@@ -17,7 +17,7 @@ LAN clients
   192.168.1.10  ◄── VRRP, only one host at a time
    ┌────┴────┐
 pihole-1   pihole-2
- .11         .12
+ (Docker)   (Docker)
    └────┬────┘
    nebula-sync
    primary → replica
@@ -25,19 +25,22 @@ pihole-1   pihole-2
 
 Pi-hole DHCP is disabled. Your router stays the DHCP server and advertises **only the VIP** as DNS.
 
+Container IPs for `pihole-1` / `pihole-2` are **assigned by Docker** on the macvlan network. Do **not** put them in `.env`. Only the floating VIP (reserved via IPAM `aux_addresses`) belongs there.
+
 ## Single-host start
 
-You need Docker Engine with the Compose plugin, and a NIC that supports promiscuous mode. Use four addresses on the same subnet: gateway, two nodes, VIP. Keep them **outside** the DHCP pool.
+You need Docker Engine with the Compose plugin, and a NIC that supports promiscuous mode. Choose a VIP on the LAN subnet, outside the DHCP pool. Gateway + VIP go in `.env`; node addresses do not.
 
 ```bash
 cp .env.example .env
-# Set LAN_PARENT, the subnet, the three addresses, and PIHOLE_PASSWORD.
+# Set LAN_PARENT, LAN_SUBNET, LAN_GATEWAY, VIP, PIHOLE_PASSWORD, Traefik.
 ./scripts/preflight.sh
 docker compose up -d --build
 ./scripts/which-master.sh
+docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}} {{end}}' pihole-1 pihole-2
 ```
 
-Primary admin UI: `http://<NODE1_IP>/admin`, or via Traefik when enabled. Password is `PIHOLE_PASSWORD`.
+Primary admin UI: Traefik (`https://<TRAEFIK_HOST>/admin/`) when enabled. Password is `PIHOLE_PASSWORD`.
 
 ### Traefik (admin UI only)
 
@@ -71,12 +74,10 @@ Upstreams, listening mode, and DHCP are not synced: they come from `.env` and ar
 dig @192.168.1.10 pi.hole
 docker compose stop pihole-1
 sleep 8
-dig @192.168.1.10 pihole-2.cluster
+dig @192.168.1.10 pi.hole
 ./scripts/which-master.sh
 docker compose start pihole-1
 ```
-
-`pihole-1.cluster` and `pihole-2.cluster` are local records. Whichever answers tells you which node holds the VIP.
 
 Both nodes start as `BACKUP` with `nopreempt`. At boot, priority 150 wins. After a failure, the survivor keeps the VIP when the other returns — no second cutover on recovery. To hand the VIP back to the primary: `docker compose restart keepalived-2`.
 
@@ -92,7 +93,11 @@ To survive host loss, use the same compose file with two `.env` files:
 | --- | --- | --- |
 | `COMPOSE_PROFILES` | `node1` | `node2` |
 | `LAN_PARENT` | that host’s NIC | that host’s NIC |
-| addresses, VIP, `VRRP_ROUTER_ID`, `VRRP_AUTH_PASS` | identical | identical |
+| `VIP`, `VRRP_ROUTER_ID`, `VRRP_AUTH_PASS` | identical | identical |
+| `PEER_HOST_1` / `REPLICA_HOST` | hostname or IP of host 2’s pihole | — |
+| `PEER_HOST_2` | — | hostname or IP of host 1’s pihole |
+
+On a single Docker engine (`bundle`), leave `PEER_HOST_*` / `REPLICA_HOST` at the defaults (`pihole-2` / `pihole-1`): keepalived and nebula-sync resolve them via Docker DNS after containers get their IPs.
 
 Both hosts must be on the **same VLAN**. Otherwise the VIP cannot migrate (ARP).
 

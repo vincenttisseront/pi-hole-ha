@@ -11,7 +11,7 @@
 #   node2   uniquement le réplica (à poser sur la machine 2)
 #
 # Les clients n'utilisent que la VIP. L'admin se fait sur le primaire
-# (Traefik → pihole-1, ou http://NODE1_IP/admin), jamais via la VIP.
+# (Traefik → pihole-1). Les IP des nœuds sont attribuées par Docker.
 
 name: pihole-cluster
 
@@ -98,12 +98,10 @@ services:
     hostname: pihole-1
     environment:
       <<: *pihole-env
-      FTLCONF_misc_dnsmasq_lines: "local=/cluster/;host-record=pihole-1.cluster,${NODE1_IP}"
     volumes:
       - ./data/pihole-1:/etc/pihole
     networks:
-      cluster:
-        ipv4_address: ${NODE1_IP}
+      cluster: {}
       traefik: {}
     labels: *traefik-labels-primary
 
@@ -114,12 +112,10 @@ services:
     hostname: pihole-2
     environment:
       <<: *pihole-env
-      FTLCONF_misc_dnsmasq_lines: "local=/cluster/;host-record=pihole-2.cluster,${NODE2_IP}"
     volumes:
       - ./data/pihole-2:/etc/pihole
     networks:
-      cluster:
-        ipv4_address: ${NODE2_IP}
+      cluster: {}
       traefik: {}
     # Réplica non exposé par défaut (TRAEFIK_REPLICA_ENABLE=false).
     # L'édition des listes se fait sur le primaire.
@@ -148,8 +144,7 @@ services:
     environment:
       ROUTER_ID: pihole-1
       INTERFACE: ${CLUSTER_INTERFACE:-auto}
-      SRC_IP: ${NODE1_IP}
-      PEER_IP: ${NODE2_IP}
+      PEER_HOST: ${PEER_HOST_1:-pihole-2}
       VIP_CIDR: ${VIP_CIDR}
       VRRP_ROUTER_ID: ${VRRP_ROUTER_ID}
       VRRP_AUTH_PASS: ${VRRP_AUTH_PASS}
@@ -167,8 +162,7 @@ services:
     environment:
       ROUTER_ID: pihole-2
       INTERFACE: ${CLUSTER_INTERFACE:-auto}
-      SRC_IP: ${NODE2_IP}
-      PEER_IP: ${NODE1_IP}
+      PEER_HOST: ${PEER_HOST_2:-pihole-1}
       VIP_CIDR: ${VIP_CIDR}
       VRRP_ROUTER_ID: ${VRRP_ROUTER_ID}
       VRRP_AUTH_PASS: ${VRRP_AUTH_PASS}
@@ -198,7 +192,7 @@ services:
     environment:
       TZ: ${TZ}
       PRIMARY: "http://127.0.0.1|${PIHOLE_PASSWORD}"
-      REPLICAS: "http://${NODE2_IP}|${PIHOLE_PASSWORD}"
+      REPLICAS: "http://${REPLICA_HOST:-pihole-2}|${PIHOLE_PASSWORD}"
       # Pas de FULL_SYNC : les clés posées par FTLCONF_* sont en lecture seule,
       # et l'API répond 400 si on les réécrit. Le .env aligne déjà ces réglages.
       FULL_SYNC: "false"
@@ -230,6 +224,9 @@ networks:
       config:
         - subnet: ${LAN_SUBNET}
           gateway: ${LAN_GATEWAY}
+          # Réserve la VIP : Docker ne l'attribue pas à un conteneur.
+          aux_addresses:
+            cluster_vip: ${VIP}
   # Réseau Docker de Traefik (external) ou bridge local si TRAEFIK_EXTERNAL=false.
   traefik:
     name: ${TRAEFIK_DOCKER_NETWORK:-traefik}

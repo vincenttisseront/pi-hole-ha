@@ -120,11 +120,13 @@ wait_holder() {
     return 1
 }
 
-dns_node() {
-    local name="$1" expected="$2"
-    local answer
-    answer="$(dig +time=2 +tries=1 +short "@${VIP}" "$name" A || true)"
-    [[ "$answer" == "$expected" ]]
+dns_ok() {
+    dig +time=2 +tries=1 +short "@${VIP}" pi.hole A >/dev/null 2>&1
+}
+
+container_ip() {
+    local name="$1"
+    docker inspect -f "{{(index .NetworkSettings.Networks \"pihole-lab\").IPAddress}}" "$name" 2>/dev/null || true
 }
 
 echo "Attente de la VIP..."
@@ -140,32 +142,29 @@ for _ in $(seq 1 30); do
     fi
     sleep 1
 done
-echo "Adresses après élection"
+echo "Adresses après élection (IP Docker assignées)"
 "${COMPOSE[@]}" exec -T keepalived-1 ip -4 addr show || true
 "${COMPOSE[@]}" exec -T keepalived-2 ip -4 addr show || true
+echo "pihole-1=$(container_ip pihole-1) pihole-2=$(container_ip pihole-2)"
 if [[ -z "$initial" ]]; then
     echo "Aucune VIP au démarrage" >&2
     exit 1
 fi
 echo "Le nœud ${initial} porte la VIP."
 
-if ! dns_node "pihole-${initial}.cluster" "$([[ "$initial" == 1 ]] && echo "$NODE1_IP" || echo "$NODE2_IP")"; then
-    echo "Le DNS de la VIP ne répond pas avec l'enregistrement du nœud ${initial}." >&2
-    dig +time=2 "@${VIP}" "pihole-${initial}.cluster" A || true
+if ! dns_ok; then
+    echo "Le DNS de la VIP ne répond pas (dig @${VIP} pi.hole)." >&2
+    dig +time=2 "@${VIP}" pi.hole A || true
     exit 1
 fi
-echo "dig @${VIP} pihole-${initial}.cluster OK"
+echo "dig @${VIP} pi.hole OK"
 
 if [[ "$initial" == 1 ]]; then
     victim_pihole=pihole-1
     survivor_keep=keepalived-2
-    survivor_name=pihole-2.cluster
-    survivor_ip="$NODE2_IP"
 else
     victim_pihole=pihole-2
     survivor_keep=keepalived-1
-    survivor_name=pihole-1.cluster
-    survivor_ip="$NODE1_IP"
 fi
 
 echo "Arrêt de ${victim_pihole} pour forcer la bascule..."
@@ -175,23 +174,22 @@ if ! wait_holder "$survivor_keep"; then
     exit 1
 fi
 
-if ! dns_node "$survivor_name" "$survivor_ip"; then
-    echo "Après bascule, ${VIP} ne sert pas ${survivor_name}." >&2
-    dig +time=2 "@${VIP}" "$survivor_name" A || true
+if ! dns_ok; then
+    echo "Après bascule, ${VIP} ne répond plus en DNS." >&2
+    dig +time=2 "@${VIP}" pi.hole A || true
     exit 1
 fi
-echo "Bascule OK : ${VIP} répond via ${survivor_name} -> ${survivor_ip}"
+echo "Bascule OK : ${VIP} répond via ${survivor_keep}"
 
 echo "Redémarrage de ${victim_pihole} (nopreempt : la VIP doit rester sur le survivant)..."
 "${COMPOSE[@]}" start "$victim_pihole"
-# Le healthcheck et keepalived reprennent ; on laisse quelques secondes.
 sleep 20
 
 if ! holder_of "$survivor_keep"; then
     echo "La VIP est revenue sur le nœud arrêté alors que nopreempt est actif." >&2
     exit 1
 fi
-if ! dns_node "$survivor_name" "$survivor_ip"; then
+if ! dns_ok; then
     echo "Le DNS de la VIP ne répond plus après le retour du nœud." >&2
     exit 1
 fi
