@@ -26,9 +26,16 @@ cat > /tmp/dnsdist.conf <<EOF
 setLocal("0.0.0.0:53")
 setACL({"0.0.0.0/0", "::/0"})
 
+-- Remonter l'IP client réelle à Pi-hole via EDNS Client Subnet (ECS).
+-- Pi-hole : dns.EDNS0ECS = true (défaut) → le Query Log affiche le client, pas dnsdist.
+setECSOverride(true)
+setECSSourcePrefixV4(32)
+setECSSourcePrefixV6(128)
+
 newServer({
   address="${P1}:53",
   name="pihole-1",
+  useClientSubnet=true,
   checkName="pi.hole.",
   checkType="A",
   checkInterval=2,
@@ -41,6 +48,7 @@ newServer({
 newServer({
   address="${P2}:53",
   name="pihole-2",
+  useClientSubnet=true,
   checkName="pi.hole.",
   checkType="A",
   checkInterval=2,

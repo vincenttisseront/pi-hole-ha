@@ -43,6 +43,8 @@ x-pihole-env: &pihole-env
   FTLCONF_webserver_api_app_sudo: "true"
   FTLCONF_webserver_domain: "${TRAEFIK_HOST:-pi.hole}"
   FTLCONF_webserver_port: "${TRAEFIK_SERVICE_PORT:-80}"
+  # dnsdist envoie l'IP client en ECS ; Pi-hole l'utilise dans le Query Log.
+  FTLCONF_dns_EDNS0ECS: "true"
 
 # Watchtower (--label-enable) : maj auto des images registry ; dnsdist = build local → off.
 x-watchtower-enable: &watchtower-enable

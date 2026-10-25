@@ -61,6 +61,10 @@ docker compose start pihole-1
 
 dnsdist prefers `pihole-1` when healthy (`firstAvailable`), then `pihole-2`.
 
+### Real client IPs in the Query Log
+
+dnsdist sits in front of Pi-hole, so without ECS every query looks like the dnsdist container. This stack enables **EDNS Client Subnet** (`useClientSubnet` + `FTLCONF_dns_EDNS0ECS=true`) so Top Clients / Query Log show the LAN client IP. Recreate `dnsdist` after pull; new queries only (old stats may still show the dnsdist IP).
+
 ## Two Docker hosts
 
 `bundle` keeps both nodes on one engine. To split hosts, use `node1` / `node2` and publish DNS on each host (or keep an external LB). Set `REPLICA_HOST` to a name reachable from the primary for nebula-sync.
