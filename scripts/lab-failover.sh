@@ -65,6 +65,9 @@ networks:
       config:
         - subnet: 192.168.199.0/24
           gateway: 192.168.199.1
+  traefik:
+    name: pihole-lab-proxy
+    driver: bridge
 """)
 PY
 

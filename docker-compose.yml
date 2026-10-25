@@ -10,7 +10,8 @@
 #   node1   uniquement le primaire (à poser sur la machine 1)
 #   node2   uniquement le réplica (à poser sur la machine 2)
 #
-# Les clients n'utilisent que la VIP. L'admin se fait sur le primaire, jamais via la VIP.
+# Les clients n'utilisent que la VIP. L'admin se fait sur le primaire
+# (Traefik → pihole-1, ou http://NODE1_IP/admin), jamais via la VIP.
 
 name: pihole-cluster
 
@@ -52,6 +53,29 @@ x-pihole-env: &pihole-env
   FTLCONF_dhcp_active: "false"
   # Autorise l'import Teleporter de nebula-sync quand on utilise un mot de passe d'application.
   FTLCONF_webserver_api_app_sudo: "true"
+  # Domaine vu par l'UI quand Traefik termine le TLS (sinon pi.hole).
+  FTLCONF_webserver_domain: "${TRAEFIK_HOST:-pi.hole}"
+  FTLCONF_webserver_port: "${TRAEFIK_SERVICE_PORT:-80}"
+
+# Labels Traefik sur le primaire. DNS inchangé (VIP / macvlan).
+x-traefik-labels-primary: &traefik-labels-primary
+  - "traefik.enable=${TRAEFIK_ENABLE:-false}"
+  - "traefik.docker.network=${TRAEFIK_DOCKER_NETWORK:-traefik}"
+  - "traefik.http.routers.pihole.rule=Host(`${TRAEFIK_HOST:-pihole.example.com}`)"
+  - "traefik.http.routers.pihole.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+  - "traefik.http.routers.pihole.tls=${TRAEFIK_TLS:-true}"
+  - "traefik.http.routers.pihole.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
+  - "traefik.http.routers.pihole.service=pihole"
+  - "traefik.http.services.pihole.loadbalancer.server.port=${TRAEFIK_SERVICE_PORT:-80}"
+  - "traefik.http.services.pihole.loadbalancer.passHostHeader=true"
+  - "traefik.http.routers.pihole-root.rule=Host(`${TRAEFIK_HOST:-pihole.example.com}`) && Path(`/`)"
+  - "traefik.http.routers.pihole-root.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+  - "traefik.http.routers.pihole-root.tls=${TRAEFIK_TLS:-true}"
+  - "traefik.http.routers.pihole-root.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
+  - "traefik.http.routers.pihole-root.middlewares=pihole-to-admin"
+  - "traefik.http.middlewares.pihole-to-admin.redirectregex.regex=.*"
+  - "traefik.http.middlewares.pihole-to-admin.redirectregex.replacement=/admin/"
+  - "traefik.http.middlewares.pihole-to-admin.redirectregex.permanent=true"
 
 x-keepalived: &keepalived
   image: pihole-cluster-keepalived:local
@@ -80,6 +104,8 @@ services:
     networks:
       cluster:
         ipv4_address: ${NODE1_IP}
+      traefik: {}
+    labels: *traefik-labels-primary
 
   pihole-2:
     <<: *pihole
@@ -94,6 +120,19 @@ services:
     networks:
       cluster:
         ipv4_address: ${NODE2_IP}
+      traefik: {}
+    # Réplica non exposé par défaut (TRAEFIK_REPLICA_ENABLE=false).
+    # L'édition des listes se fait sur le primaire.
+    labels:
+      - "traefik.enable=${TRAEFIK_REPLICA_ENABLE:-false}"
+      - "traefik.docker.network=${TRAEFIK_DOCKER_NETWORK:-traefik}"
+      - "traefik.http.routers.pihole-replica.rule=Host(`${TRAEFIK_HOST_REPLICA:-pihole-replica.example.com}`)"
+      - "traefik.http.routers.pihole-replica.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.pihole-replica.tls=${TRAEFIK_TLS:-true}"
+      - "traefik.http.routers.pihole-replica.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.pihole-replica.service=pihole-replica"
+      - "traefik.http.services.pihole-replica.loadbalancer.server.port=${TRAEFIK_SERVICE_PORT:-80}"
+      - "traefik.http.services.pihole-replica.loadbalancer.passHostHeader=true"
 
   keepalived-1:
     <<: *keepalived
@@ -191,3 +230,7 @@ networks:
       config:
         - subnet: ${LAN_SUBNET}
           gateway: ${LAN_GATEWAY}
+  # Réseau Docker de Traefik (external) ou bridge local si TRAEFIK_EXTERNAL=false.
+  traefik:
+    name: ${TRAEFIK_DOCKER_NETWORK:-traefik}
+    external: ${TRAEFIK_EXTERNAL:-true}

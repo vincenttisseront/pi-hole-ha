@@ -37,7 +37,27 @@ docker compose up -d --build
 ./scripts/which-master.sh
 ```
 
-Primary admin UI: `http://<NODE1_IP>/admin`. Password is `PIHOLE_PASSWORD`.
+Primary admin UI: `http://<NODE1_IP>/admin`, or via Traefik when enabled. Password is `PIHOLE_PASSWORD`.
+
+### Traefik (admin UI only)
+
+DNS stays on the VIP / macvlan. Traefik only proxies the **primary** web UI.
+
+In `.env` (defaults assume you already run Traefik):
+
+| Variable | Typical value |
+| --- | --- |
+| `TRAEFIK_ENABLE` | `true` |
+| `TRAEFIK_EXTERNAL` | `true` |
+| `TRAEFIK_DOCKER_NETWORK` | name of your Traefik Docker network (`docker network ls`) |
+| `TRAEFIK_HOST` | `pihole.your.domain` |
+| `TRAEFIK_ENTRYPOINT` | `websecure` |
+| `TRAEFIK_CERTRESOLVER` | your ACME resolver name |
+| `TRAEFIK_REPLICA_ENABLE` | `false` (keep edits on the primary) |
+
+Traefik must share `TRAEFIK_DOCKER_NETWORK` with this stack. `/` redirects to `/admin/`.
+
+Without Traefik: `TRAEFIK_ENABLE=false` and `TRAEFIK_EXTERNAL=false`.
 
 Change lists, domains, groups, and clients **on the primary**. nebula-sync copies them to the replica. Edits on the replica (or on the VIP while it sits on the replica) are overwritten.
 
