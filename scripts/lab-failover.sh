@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Vérifie la bascule de VIP sur un bridge Docker, sans toucher au LAN.
-# Les services viennent de docker-compose.yml ; seul le réseau est remplacé.
+# Vérifie la bascule DNS via dnsdist sur 127.0.0.1 (sans macvlan / VIP).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,7 +7,7 @@ cd "$ROOT"
 
 ENV_FILE="$ROOT/.env.lab"
 LAB_COMPOSE="$(mktemp)"
-export ENV_FILE PREFLIGHT_SKIP_NIC=1
+export ENV_FILE
 
 if docker info >/dev/null 2>&1; then
     COMPOSE=(docker compose --project-directory "$ROOT" -f "$LAB_COMPOSE" --env-file "$ENV_FILE")
@@ -26,9 +25,10 @@ cleanup() {
         "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
         rm -f "$LAB_COMPOSE"
     fi
-    if [[ "${LAB_LEGACY_FW:-0}" == 1 && -n "${LAN_SUBNET:-}" ]]; then
-        sudo iptables-legacy -D FORWARD -s "$LAN_SUBNET" -j ACCEPT >/dev/null 2>&1 || true
-        sudo iptables-legacy -D FORWARD -d "$LAN_SUBNET" -j ACCEPT >/dev/null 2>&1 || true
+    docker network rm pihole-lab >/dev/null 2>&1 || true
+    if [[ "${LAB_LEGACY_FW:-0}" == 1 && -n "${LAB_FW_SUB:-}" ]]; then
+        sudo iptables-legacy -D FORWARD -s "$LAB_FW_SUB" -j ACCEPT >/dev/null 2>&1 || true
+        sudo iptables-legacy -D FORWARD -d "$LAB_FW_SUB" -j ACCEPT >/dev/null 2>&1 || true
     fi
 }
 
@@ -45,153 +45,69 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# Ce noyau de lab n'a pas forcément macvlan. On garde les services du
-# compose de production et on remplace seulement le réseau par un bridge,
-# pour pouvoir joindre la VIP depuis l'hôte sans toucher au LAN.
-python3 - "$ROOT/docker-compose.yml" "$LAB_COMPOSE" <<'PY'
-import sys
-from pathlib import Path
-source, dest = sys.argv[1:]
-text = Path(source).read_text()
-head, sep, _ = text.partition("\nnetworks:\n")
-if not sep:
-    raise SystemExit("bloc networks introuvable dans docker-compose.yml")
-Path(dest).write_text(head + """
-networks:
-  cluster:
-    name: pihole-lab
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 192.168.199.0/24
-          gateway: 192.168.199.1
-  traefik:
-    name: pihole-lab-proxy
-    driver: bridge
-""")
-PY
-
+cp "$ROOT/docker-compose.yml" "$LAB_COMPOSE"
 cp "$ROOT/env.lab.example" "$ENV_FILE"
-"$ROOT/scripts/preflight.sh"
 
-# shellcheck disable=SC1090
 set -a
+# shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
 
-# Certains hôtes ont iptables-legacy (FORWARD DROP) en plus des règles nft
-# que Docker programme. Le subnet du lab n'est alors pas routé : Pi-hole ne
-# peut pas télécharger gravity. On ouvre ce subnet uniquement pour le test.
+sudo rm -rf "$ROOT/data"
+
+echo "Préparation réseau lab ${DOCKER_NETWORK}..."
+docker network inspect "$DOCKER_NETWORK" >/dev/null 2>&1 \
+    || docker network create "$DOCKER_NETWORK" >/dev/null
+
 if sudo iptables-legacy -S FORWARD 2>/dev/null | head -n 1 | grep -q -- '-P FORWARD DROP'; then
     LAB_LEGACY_FW=1
-    sudo iptables-legacy -C FORWARD -s "$LAN_SUBNET" -j ACCEPT 2>/dev/null \
-        || sudo iptables-legacy -I FORWARD 1 -s "$LAN_SUBNET" -j ACCEPT
-    sudo iptables-legacy -C FORWARD -d "$LAN_SUBNET" -j ACCEPT 2>/dev/null \
-        || sudo iptables-legacy -I FORWARD 1 -d "$LAN_SUBNET" -j ACCEPT
+    SUB="$(docker network inspect "$DOCKER_NETWORK" -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || true)"
+    if [[ -n "$SUB" ]]; then
+        LAB_FW_SUB="$SUB"
+        sudo iptables-legacy -C FORWARD -s "$SUB" -j ACCEPT 2>/dev/null \
+            || sudo iptables-legacy -I FORWARD 1 -s "$SUB" -j ACCEPT
+        sudo iptables-legacy -C FORWARD -d "$SUB" -j ACCEPT 2>/dev/null \
+            || sudo iptables-legacy -I FORWARD 1 -d "$SUB" -j ACCEPT
+        echo "FORWARD legacy ouvert pour $SUB"
+    fi
 fi
 
-sudo rm -rf "$ROOT/data"
+"$ROOT/scripts/preflight.sh"
 
 echo "Construction et démarrage du cluster de lab..."
 "${COMPOSE[@]}" up -d --build --wait --wait-timeout 300
 
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-
-holder_of() {
-    local container="$1"
-    local addr
-    addr="$("${COMPOSE[@]}" exec -T "$container" ip -4 addr show 2>/dev/null || true)"
-    [[ "$addr" == *" ${VIP}/"* ]]
-}
-
-wait_holder() {
-    local container="$1"
-    local i
-    for i in $(seq 1 25); do
-        if holder_of "$container"; then
-            return 0
-        fi
-        sleep 1
-    done
-    echo "Délai dépassé : $container n'a pas ${VIP}" >&2
-    "${COMPOSE[@]}" exec -T keepalived-1 ip -4 addr || true
-    "${COMPOSE[@]}" exec -T keepalived-2 ip -4 addr || true
-    return 1
-}
-
 dns_ok() {
-    dig +time=2 +tries=1 +short "@${VIP}" pi.hole A >/dev/null 2>&1
+    dig +time=2 +tries=1 +short @"${DNS_HOST_IP}" pi.hole A >/dev/null 2>&1
 }
 
-container_ip() {
-    local name="$1"
-    docker inspect -f "{{(index .NetworkSettings.Networks \"pihole-lab\").IPAddress}}" "$name" 2>/dev/null || true
-}
-
-echo "Attente de la VIP..."
-initial=""
-for _ in $(seq 1 30); do
-    if holder_of keepalived-1; then
-        initial=1
-        break
-    fi
-    if holder_of keepalived-2; then
-        initial=2
-        break
-    fi
-    sleep 1
-done
-echo "Adresses après élection (IP Docker assignées)"
-"${COMPOSE[@]}" exec -T keepalived-1 ip -4 addr show || true
-"${COMPOSE[@]}" exec -T keepalived-2 ip -4 addr show || true
-echo "pihole-1=$(container_ip pihole-1) pihole-2=$(container_ip pihole-2)"
-if [[ -z "$initial" ]]; then
-    echo "Aucune VIP au démarrage" >&2
-    exit 1
-fi
-echo "Le nœud ${initial} porte la VIP."
+echo "IP Docker :"
+docker inspect -f "{{.Name}} {{range \$k, \$v := .NetworkSettings.Networks}}{{\$k}}={{\$v.IPAddress}} {{end}}" pihole-1 pihole-2 || true
 
 if ! dns_ok; then
-    echo "Le DNS de la VIP ne répond pas (dig @${VIP} pi.hole)." >&2
-    dig +time=2 "@${VIP}" pi.hole A || true
+    echo "DNS hôte ${DNS_HOST_IP} ne répond pas." >&2
+    dig +time=2 @"${DNS_HOST_IP}" pi.hole A || true
     exit 1
 fi
-echo "dig @${VIP} pi.hole OK"
+echo "dig @${DNS_HOST_IP} pi.hole OK"
 
-if [[ "$initial" == 1 ]]; then
-    victim_pihole=pihole-1
-    survivor_keep=keepalived-2
-else
-    victim_pihole=pihole-2
-    survivor_keep=keepalived-1
-fi
-
-echo "Arrêt de ${victim_pihole} pour forcer la bascule..."
-"${COMPOSE[@]}" stop "$victim_pihole"
-
-if ! wait_holder "$survivor_keep"; then
-    exit 1
-fi
+echo "Arrêt de pihole-1 (bascule dnsdist → pihole-2)..."
+"${COMPOSE[@]}" stop pihole-1
+sleep 6
 
 if ! dns_ok; then
-    echo "Après bascule, ${VIP} ne répond plus en DNS." >&2
-    dig +time=2 "@${VIP}" pi.hole A || true
+    echo "Après arrêt du primaire, ${DNS_HOST_IP} ne répond plus." >&2
+    "${COMPOSE[@]}" exec -T dnsdist dnsdist -e 'showServers()' || true
     exit 1
 fi
-echo "Bascule OK : ${VIP} répond via ${survivor_keep}"
+echo "Bascule OK via pihole-2"
 
-echo "Redémarrage de ${victim_pihole} (nopreempt : la VIP doit rester sur le survivant)..."
-"${COMPOSE[@]}" start "$victim_pihole"
-sleep 20
-
-if ! holder_of "$survivor_keep"; then
-    echo "La VIP est revenue sur le nœud arrêté alors que nopreempt est actif." >&2
-    exit 1
-fi
+echo "Redémarrage de pihole-1..."
+"${COMPOSE[@]}" start pihole-1
+sleep 15
 if ! dns_ok; then
-    echo "Le DNS de la VIP ne répond plus après le retour du nœud." >&2
+    echo "DNS cassé après retour du primaire." >&2
     exit 1
 fi
 
-echo "Lab OK : VIP ${VIP}, bascule, et pas de retour agressif."
+echo "Lab OK : DNS = hôte ${DNS_HOST_IP}, bascule dnsdist sans VIP."

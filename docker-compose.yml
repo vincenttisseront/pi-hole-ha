@@ -1,31 +1,22 @@
-# Cluster DNS Pi-hole : deux nœuds, une VIP VRRP, synchro primaire → réplica.
+# Cluster Pi-hole HA derrière Traefik + DNS sur l'hôte Docker.
 #
-# Pi-hole n'a pas de mode cluster. Ce stack le construit :
-#   - pihole-1 (priorité 150) et pihole-2 (priorité 100) répondent en DNS ;
-#   - keepalived élit une VIP unique (VRRP unicast) et la retire si le DNS local ne répond plus ;
-#   - nebula-sync recopie listes, groupes, clients et domaines du primaire.
+# - pihole-1 / pihole-2 : IP attribuées par Docker (aucun NODE*_IP / VIP dans .env)
+# - dnsdist : écoute :53 sur l'hôte et bascule vers un backend sain
+# - nebula-sync : listes / groupes / clients du primaire → réplica
+# - Traefik : UI admin du primaire (même réseau Docker)
 #
-# Profils (COMPOSE_PROFILES dans .env) :
-#   bundle  les deux nœuds sur ce moteur Docker
-#   node1   uniquement le primaire (à poser sur la machine 1)
-#   node2   uniquement le réplica (à poser sur la machine 2)
-#
-# Les clients n'utilisent que la VIP. L'admin se fait sur le primaire
-# (Traefik → pihole-1). Les IP des nœuds sont attribuées par Docker.
+# COMPOSE_PROFILES :
+#   bundle  les deux nœuds + dnsdist + sync (un hôte)
+#   node1   primaire (+ sync) sans dnsdist
+#   node2   réplica seul
 
 name: pihole-cluster
 
 x-pihole: &pihole
   image: pihole/pihole:latest
   cap_add:
-    - NET_ADMIN
-    - NET_BROADCAST
-    - NET_RAW
     - SYS_NICE
     - SYS_TIME
-  sysctls:
-    - net.ipv4.conf.all.rp_filter=0
-    - net.ipv4.conf.default.rp_filter=0
   dns:
     - ${UPSTREAM_1}
     - ${UPSTREAM_2}
@@ -45,22 +36,17 @@ x-pihole: &pihole
 x-pihole-env: &pihole-env
   TZ: ${TZ}
   FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD}
-  # La VIP est ajoutée après le démarrage : FTL doit écouter toutes les interfaces.
   FTLCONF_dns_listeningMode: "ALL"
   FTLCONF_dns_upstreams: "${UPSTREAM_1};${UPSTREAM_2}"
   FTLCONF_dns_dnssec: "${DNSSEC:-false}"
-  # Le DHCP des deux nœuds se marcherait dessus. Le routeur distribue la VIP comme DNS.
   FTLCONF_dhcp_active: "false"
-  # Autorise l'import Teleporter de nebula-sync quand on utilise un mot de passe d'application.
   FTLCONF_webserver_api_app_sudo: "true"
-  # Domaine vu par l'UI quand Traefik termine le TLS (sinon pi.hole).
   FTLCONF_webserver_domain: "${TRAEFIK_HOST:-pi.hole}"
   FTLCONF_webserver_port: "${TRAEFIK_SERVICE_PORT:-80}"
 
-# Labels Traefik sur le primaire. DNS inchangé (VIP / macvlan).
 x-traefik-labels-primary: &traefik-labels-primary
   - "traefik.enable=${TRAEFIK_ENABLE:-false}"
-  - "traefik.docker.network=${TRAEFIK_DOCKER_NETWORK:-traefik}"
+  - "traefik.docker.network=${DOCKER_NETWORK}"
   - "traefik.http.routers.pihole.rule=Host(`${TRAEFIK_HOST:-pihole.example.com}`)"
   - "traefik.http.routers.pihole.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
   - "traefik.http.routers.pihole.tls=${TRAEFIK_TLS:-true}"
@@ -77,19 +63,6 @@ x-traefik-labels-primary: &traefik-labels-primary
   - "traefik.http.middlewares.pihole-to-admin.redirectregex.replacement=/admin/"
   - "traefik.http.middlewares.pihole-to-admin.redirectregex.permanent=true"
 
-x-keepalived: &keepalived
-  image: pihole-cluster-keepalived:local
-  cap_add:
-    - NET_ADMIN
-    - NET_BROADCAST
-    - NET_RAW
-  restart: unless-stopped
-  logging:
-    driver: json-file
-    options:
-      max-size: "10m"
-      max-file: "3"
-
 services:
   pihole-1:
     <<: *pihole
@@ -101,8 +74,7 @@ services:
     volumes:
       - ./data/pihole-1:/etc/pihole
     networks:
-      cluster: {}
-      traefik: {}
+      proxy: {}
     labels: *traefik-labels-primary
 
   pihole-2:
@@ -115,13 +87,10 @@ services:
     volumes:
       - ./data/pihole-2:/etc/pihole
     networks:
-      cluster: {}
-      traefik: {}
-    # Réplica non exposé par défaut (TRAEFIK_REPLICA_ENABLE=false).
-    # L'édition des listes se fait sur le primaire.
+      proxy: {}
     labels:
       - "traefik.enable=${TRAEFIK_REPLICA_ENABLE:-false}"
-      - "traefik.docker.network=${TRAEFIK_DOCKER_NETWORK:-traefik}"
+      - "traefik.docker.network=${DOCKER_NETWORK}"
       - "traefik.http.routers.pihole-replica.rule=Host(`${TRAEFIK_HOST_REPLICA:-pihole-replica.example.com}`)"
       - "traefik.http.routers.pihole-replica.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.pihole-replica.tls=${TRAEFIK_TLS:-true}"
@@ -130,59 +99,32 @@ services:
       - "traefik.http.services.pihole-replica.loadbalancer.server.port=${TRAEFIK_SERVICE_PORT:-80}"
       - "traefik.http.services.pihole-replica.loadbalancer.passHostHeader=true"
 
-  keepalived-1:
-    <<: *keepalived
-    # Un seul build dans le profil bundle. Deux builds parallèles du même tag
-    # échouent avec "image already exists" sans buildx.
-    build: ./keepalived
-    profiles: ["bundle", "node1"]
-    container_name: keepalived-1
-    network_mode: "service:pihole-1"
+  # DNS des clients = IP de cet hôte Docker (pas une VIP dans .env).
+  dnsdist:
+    image: pihole-cluster-dnsdist:local
+    build: ./dnsdist
+    profiles: ["bundle"]
+    container_name: dnsdist
     depends_on:
       pihole-1:
         condition: service_healthy
-    environment:
-      ROUTER_ID: pihole-1
-      INTERFACE: ${CLUSTER_INTERFACE:-auto}
-      PEER_HOST: ${PEER_HOST_1:-pihole-2}
-      VIP_CIDR: ${VIP_CIDR}
-      VRRP_ROUTER_ID: ${VRRP_ROUTER_ID}
-      VRRP_AUTH_PASS: ${VRRP_AUTH_PASS}
-      PRIORITY: ${NODE1_PRIORITY:-150}
-      KEEPALIVED_DEBUG: ${KEEPALIVED_DEBUG:-0}
-
-  keepalived-2: &keepalived-2
-    <<: *keepalived
-    profiles: ["bundle"]
-    container_name: keepalived-2
-    network_mode: "service:pihole-2"
-    depends_on:
       pihole-2:
         condition: service_healthy
-    environment:
-      ROUTER_ID: pihole-2
-      INTERFACE: ${CLUSTER_INTERFACE:-auto}
-      PEER_HOST: ${PEER_HOST_2:-pihole-1}
-      VIP_CIDR: ${VIP_CIDR}
-      VRRP_ROUTER_ID: ${VRRP_ROUTER_ID}
-      VRRP_AUTH_PASS: ${VRRP_AUTH_PASS}
-      PRIORITY: ${NODE2_PRIORITY:-100}
-      KEEPALIVED_DEBUG: ${KEEPALIVED_DEBUG:-0}
-
-  # Même nœud que keepalived-2. Il porte le build parce que, sur la machine 2,
-  # keepalived-1 (qui construit l'image dans le profil bundle) n'est pas là.
-  # Les deux profils ne sont pas activés ensemble : un seul des deux services existe.
-  keepalived-2-node:
-    <<: *keepalived-2
-    build: ./keepalived
-    profiles: ["node2"]
-
+    ports:
+      - "${DNS_HOST_IP:-0.0.0.0}:53:53/tcp"
+      - "${DNS_HOST_IP:-0.0.0.0}:53:53/udp"
+    networks:
+      proxy: {}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
   nebula-sync:
     image: ghcr.io/lovelaze/nebula-sync:latest
     profiles: ["bundle", "node1"]
     container_name: nebula-sync
-    # Même pile réseau que le primaire : pas d'adresse LAN supplémentaire.
-    network_mode: "service:pihole-1"
     depends_on:
       pihole-1:
         condition: service_healthy
@@ -191,10 +133,8 @@ services:
         required: false
     environment:
       TZ: ${TZ}
-      PRIMARY: "http://127.0.0.1|${PIHOLE_PASSWORD}"
+      PRIMARY: "http://pihole-1|${PIHOLE_PASSWORD}"
       REPLICAS: "http://${REPLICA_HOST:-pihole-2}|${PIHOLE_PASSWORD}"
-      # Pas de FULL_SYNC : les clés posées par FTLCONF_* sont en lecture seule,
-      # et l'API répond 400 si on les réécrit. Le .env aligne déjà ces réglages.
       FULL_SYNC: "false"
       RUN_GRAVITY: "${RUN_GRAVITY:-true}"
       SYNC_GRAVITY_GROUP: "true"
@@ -207,6 +147,8 @@ services:
       CRON: "${SYNC_CRON}"
       CLIENT_RETRY_DELAY_SECONDS: "10"
       CLIENT_TIMEOUT_SECONDS: "120"
+    networks:
+      proxy: {}
     restart: unless-stopped
     logging:
       driver: json-file
@@ -215,19 +157,7 @@ services:
         max-file: "3"
 
 networks:
-  cluster:
-    name: ${CLUSTER_DOCKER_NETWORK:-pihole-cluster}
-    driver: macvlan
-    driver_opts:
-      parent: ${LAN_PARENT}
-    ipam:
-      config:
-        - subnet: ${LAN_SUBNET}
-          gateway: ${LAN_GATEWAY}
-          # Réserve la VIP : Docker ne l'attribue pas à un conteneur.
-          aux_addresses:
-            cluster_vip: ${VIP}
-  # Réseau Docker de Traefik (external) ou bridge local si TRAEFIK_EXTERNAL=false.
-  traefik:
-    name: ${TRAEFIK_DOCKER_NETWORK:-traefik}
-    external: ${TRAEFIK_EXTERNAL:-true}
+  # Même réseau que Traefik (ex. vpcbr). Docker y assigne les IP des conteneurs.
+  proxy:
+    name: ${DOCKER_NETWORK}
+    external: ${DOCKER_NETWORK_EXTERNAL:-true}
