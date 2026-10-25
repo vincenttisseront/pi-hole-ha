@@ -84,8 +84,31 @@ Uses a local bridge, binds DNS on `127.0.0.1`, stops the primary, checks dnsdist
 | --- | --- |
 | `preflight` rejects VIP / NODE*_IP | Copy a fresh `.env.example` — those keys are gone |
 | network not found | `DOCKER_NETWORK` must match Traefik (`docker network ls`) |
-| permission / bind 53 | something else on the host uses 53; or use `sudo` / rootful Docker |
+| `failed to bind host port …:53` | See **Port 53 already in use** below |
 | Traefik 404 | Pi-hole and Traefik must share `DOCKER_NETWORK` |
-| nebula-sync 401 | password mismatch or `|` inside `PIHOLE_PASSWORD` |
+| nebula-sync 401 | password mismatch or `\|` inside `PIHOLE_PASSWORD` |
+
+### Port 53 already in use
+
+```bash
+sudo ss -ulnp | grep ':53'
+sudo ss -tlnp | grep ':53'
+```
+
+Prefer binding dnsdist to the VM LAN IP only (avoids clashing with systemd-resolved on `127.0.0.53`):
+
+```bash
+# in .env
+DNS_HOST_IP=172.24.0.110
+sudo docker compose up -d dnsdist
+dig @172.24.0.110 pi.hole
+```
+
+Or disable the resolved stub, then `DNS_HOST_IP=0.0.0.0` can work:
+
+```bash
+sudo sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+sudo systemctl restart systemd-resolved
+```
 
 Logs: `docker compose logs -f dnsdist pihole-1 nebula-sync`.
