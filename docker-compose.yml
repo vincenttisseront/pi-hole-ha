@@ -129,7 +129,7 @@ services:
       - "traefik.http.routers.pihole-replica.rule=Host(`${TRAEFIK_HOST_REPLICA:-pihole-replica.example.com}`)"
       - "traefik.http.routers.pihole-replica.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.pihole-replica.tls=${TRAEFIK_TLS:-true}"
-      - "traefik.http.routers.pihole-replica.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.pihole-replica.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
       - "traefik.http.routers.pihole-replica.service=pihole-replica"
       - "traefik.http.services.pihole-replica.loadbalancer.server.port=${TRAEFIK_SERVICE_PORT:-80}"
       - "traefik.http.services.pihole-replica.loadbalancer.passHostHeader=true"
