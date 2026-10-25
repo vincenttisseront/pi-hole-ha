@@ -3,7 +3,7 @@
 # Pi-hole n'a pas de mode cluster. Ce stack le construit :
 #   - pihole-1 (priorité 150) et pihole-2 (priorité 100) répondent en DNS ;
 #   - keepalived élit une VIP unique (VRRP unicast) et la retire si le DNS local ne répond plus ;
-#   - nebula-sync pousse la configuration du primaire vers le réplica.
+#   - nebula-sync recopie listes, groupes, clients et domaines du primaire.
 #
 # Profils (COMPOSE_PROFILES dans .env) :
 #   bundle  les deux nœuds sur ce moteur Docker
@@ -160,8 +160,17 @@ services:
       TZ: ${TZ}
       PRIMARY: "http://127.0.0.1|${PIHOLE_PASSWORD}"
       REPLICAS: "http://${NODE2_IP}|${PIHOLE_PASSWORD}"
-      FULL_SYNC: "true"
+      # Pas de FULL_SYNC : les clés posées par FTLCONF_* sont en lecture seule,
+      # et l'API répond 400 si on les réécrit. Le .env aligne déjà ces réglages.
+      FULL_SYNC: "false"
       RUN_GRAVITY: "${RUN_GRAVITY:-true}"
+      SYNC_GRAVITY_GROUP: "true"
+      SYNC_GRAVITY_AD_LIST: "true"
+      SYNC_GRAVITY_AD_LIST_BY_GROUP: "true"
+      SYNC_GRAVITY_DOMAIN_LIST: "true"
+      SYNC_GRAVITY_DOMAIN_LIST_BY_GROUP: "true"
+      SYNC_GRAVITY_CLIENT: "true"
+      SYNC_GRAVITY_CLIENT_BY_GROUP: "true"
       CRON: "${SYNC_CRON}"
       CLIENT_RETRY_DELAY_SECONDS: "10"
       CLIENT_TIMEOUT_SECONDS: "120"

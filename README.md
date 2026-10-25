@@ -8,7 +8,7 @@ Pi-hole n’a pas de mode cluster. Ce dépôt le construit avec trois briques :
 | --- | --- |
 | `pihole-1`, `pihole-2` | Deux résolveurs indépendants, chacun avec sa propre base |
 | keepalived | Protocole VRRP : une VIP unique, retirée si le DNS local ne répond plus |
-| [nebula-sync](https://github.com/lovelaze/nebula-sync) | Pousse la configuration du primaire vers le réplica (API Pi-hole v6) |
+| [nebula-sync](https://github.com/lovelaze/nebula-sync) | Recopie listes, groupes, clients et domaines du primaire vers le réplica |
 
 ```
 clients du LAN
@@ -40,6 +40,8 @@ docker compose up -d --build
 L’interface d’admin du primaire : `http://<NODE1_IP>/admin`. Le mot de passe est `PIHOLE_PASSWORD`.
 
 Les modifications (listes, domaines, groupes, clients) se font **sur le primaire**. nebula-sync les recopie vers le réplica. Une modification faite sur le réplica, ou via la VIP quand elle est sur le réplica, sera écrasée.
+
+Les upstreams, le mode d’écoute et le DHCP ne passent pas par la synchro : ils viennent du `.env` et sont identiques sur les deux nœuds. Pi-hole verrouille toute valeur fournie par `FTLCONF_*`. Un import complet de la configuration se heurte à ces clés et l’API répond 400.
 
 `SYNC_CRON` est à toutes les 15 minutes. Un cron chaque minute finit par faire échouer l’authentification de l’API.
 
