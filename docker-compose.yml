@@ -55,7 +55,6 @@ x-pihole-env: &pihole-env
 
 x-keepalived: &keepalived
   image: pihole-cluster-keepalived:local
-  build: ./keepalived
   cap_add:
     - NET_ADMIN
     - NET_BROADCAST
@@ -98,6 +97,9 @@ services:
 
   keepalived-1:
     <<: *keepalived
+    # Un seul build dans le profil bundle. Deux builds parallèles du même tag
+    # échouent avec "image already exists" sans buildx.
+    build: ./keepalived
     profiles: ["bundle", "node1"]
     container_name: keepalived-1
     network_mode: "service:pihole-1"
@@ -115,9 +117,9 @@ services:
       PRIORITY: ${NODE1_PRIORITY:-150}
       KEEPALIVED_DEBUG: ${KEEPALIVED_DEBUG:-0}
 
-  keepalived-2:
+  keepalived-2: &keepalived-2
     <<: *keepalived
-    profiles: ["bundle", "node2"]
+    profiles: ["bundle"]
     container_name: keepalived-2
     network_mode: "service:pihole-2"
     depends_on:
@@ -133,6 +135,14 @@ services:
       VRRP_AUTH_PASS: ${VRRP_AUTH_PASS}
       PRIORITY: ${NODE2_PRIORITY:-100}
       KEEPALIVED_DEBUG: ${KEEPALIVED_DEBUG:-0}
+
+  # Même nœud que keepalived-2. Il porte le build parce que, sur la machine 2,
+  # keepalived-1 (qui construit l'image dans le profil bundle) n'est pas là.
+  # Les deux profils ne sont pas activés ensemble : un seul des deux services existe.
+  keepalived-2-node:
+    <<: *keepalived-2
+    build: ./keepalived
+    profiles: ["node2"]
 
   nebula-sync:
     image: ghcr.io/lovelaze/nebula-sync:latest

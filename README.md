@@ -78,6 +78,8 @@ Les deux hôtes sont dans le **même VLAN**. Sinon la VIP ne peut pas migrer (AR
 docker compose up -d --build
 ```
 
+Sur la machine 2, le service keepalived s’appelle `keepalived-2-node` : c’est lui qui construit l’image, puisque `keepalived-1` n’est pas sur cet hôte. Le conteneur reste `keepalived-2`.
+
 Ouvrir entre les nœuds : TCP 80 (synchro) et le protocole IP 112 (VRRP unicast). Les clients n’ont besoin que de UDP/TCP 53 vers la VIP.
 
 Ne lance pas `bundle` sur les deux machines : les adresses seraient en double.
